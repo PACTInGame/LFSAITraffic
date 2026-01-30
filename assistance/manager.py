@@ -1,5 +1,6 @@
 from typing import Dict, Optional
 
+from assistance.AI_Driver import AIDriver
 from assistance.auto_hold import AutoHold
 from assistance.base_system import AssistanceSystem
 from core.event_bus import EventBus
@@ -29,7 +30,7 @@ class AssistanceManager:
 
     def _init_systems(self):
         """Initialisiert alle Assistenzsysteme"""
-        self.systems['autoh'] = AutoHold(self.event_bus, self.settings)
+        self.systems['AID'] = AIDriver(self.event_bus, self.settings)
 
         # Weitere Systeme hier hinzufügen
 

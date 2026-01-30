@@ -2,6 +2,7 @@ import pyinsim
 from typing import Dict, Any, Callable
 import time
 
+from AI_Control import AICarController
 from core.event_bus import EventBus
 from core.settings_manager import SettingsManager
 from lfs.lfs_state import StateHandler
@@ -23,7 +24,7 @@ class LFSConnector:
         self.event_bus.subscribe("send_light_command", self.send_light_command)
         self.event_bus.subscribe("request_axm_update", self._request_axm_update)
         self.event_bus.subscribe("siren_state_changed", self._siren_state_changed)
-
+        self.AIController = None
 
 
     def _siren_state_changed(self, data):
@@ -80,6 +81,8 @@ class LFSConnector:
 
             self.insim.send(pyinsim.ISP_TINY, ReqI=255, SubT=pyinsim.TINY_SST)
             self.insim.send(pyinsim.ISP_TINY, ReqI=255, SubT=pyinsim.TINY_AXM)
+            self.AIController = AICarController(self.insim)
+            self.event_bus.emit('AI_Controller_initialized', self.AIController)
 
 
         except Exception as e:
@@ -128,6 +131,7 @@ class LFSConnector:
     def _handle_layout(self, insim, axm):
         """Verarbeitet Layout-Pakete"""
         self.event_bus.emit('layout_received', axm)
+        print("DEBUG: AXM layout received with", len(axm.Info), "objects.")
 
     def _outgauge_handler(self, outgauge, packet):
         """Handler für OutGauge-Pakete (hochfrequent)"""

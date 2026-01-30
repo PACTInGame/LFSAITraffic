@@ -137,13 +137,13 @@ class AICarController:
         if center_zero:
             # -100 to +100 range, map to 0-65535
             if -100 <= value <= 100:
-                return int(self.ANALOG_CENTER + (value / 100.0) * self.ANALOG_CENTER)
-            return int(value)
+                return max(1,int(self.ANALOG_CENTER + (value / 100.0) * self.ANALOG_CENTER))
+            return max(1, int(value))
         else:
             # 0-100 percentage or raw value
             if 0 <= value <= 100:
-                return int((value / 100.0) * self.ANALOG_MAX)
-            return int(value)
+                return max(1, int((value / 100.0) * self.ANALOG_MAX))
+            return max(1, int(value))
 
     def _build_input_list(self, state: AIControlState) -> List[pyinsim.AIInputVal]:
         """
@@ -301,6 +301,7 @@ class AICarController:
         """
         inputs = self._build_input_list(state)
         if inputs:
+            print("Inputs:", inputs)
             self.insim.send(pyinsim.ISP_AIC, PLID=plid, Inputs=inputs)
 
     def control_ai_raw(self, plid: int, controls: Dict[str, Any]) -> None:
@@ -450,22 +451,21 @@ if __name__ == "__main__":
     controller = AICarController(insim)
 
     # Example 1: Simple control
-    controller.control_ai(1, AIControlState(
-        ignition=True,
-        throttle=75,
+    controller.control_ai(2, AIControlState(
+        throttle=75, # 75% throttle
+        brake=50, # no brake
         steer=10,  # Slight right
-        headlights=HeadlightMode.LOW
     ))
 
     # Example 2: Using dictionary interface
-    controller.control_ai_raw(1, {
+    controller.control_ai_raw(2, {
         'throttle': 50,
         'steer': -20,  # Left turn
         'indicators': IndicatorMode.LEFT
     })
 
     # Example 3: Using helper functions
-    controller.control_ai(1, AIControlHelper.drive_forward(speed_percent=80))
+    #controller.control_ai(2, AIControlHelper.drive_forward(speed_percent=80))
 
 
     # Example 4: Request AI info with callback
@@ -473,8 +473,8 @@ if __name__ == "__main__":
         print(f"AI {aii.PLID}: RPM={aii.RPM}, Gear={aii.Gear}")
 
 
-    controller.bind_ai_info_handler(1, monitor_ai)
-    controller.request_ai_info(1, repeat_interval=200)
+    controller.bind_ai_info_handler(2, monitor_ai)
+    controller.request_ai_info(2, repeat_interval=200)
 
     # Start InSim
     pyinsim.run()

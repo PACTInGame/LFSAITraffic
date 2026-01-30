@@ -29,6 +29,7 @@ class Vehicle:
         self.data = VehicleData(player_id=player_id)
         self.last_update = 0
         self.previous_speed = 0.0
+        self.current_route = None
 
 
     def update_position(self, x: float, y: float, z: float, heading: float,
