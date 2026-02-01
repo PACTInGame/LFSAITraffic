@@ -93,23 +93,73 @@ def get_next_points_on_route(current_index, route_points, num_points=5):
     return next_points
 
 
+def get_next_points_for_distance(current_index, route_points, min_distance=50.0, min_points=5):
+    """
+    Get points on the route until either min_distance is covered OR min_points are collected,
+    whichever results in MORE points.
+
+    Args:
+        current_index: Current position index on the route
+        route_points: Dict containing 'path' key with list of [x, y, z] points
+        min_distance: Minimum distance to cover in meters (default: 50.0)
+        min_points: Minimum number of points to collect (default: 5)
+
+    Returns:
+        List of points covering at least min_distance or min_points (whichever is more)
+    """
+    path = route_points.get('path', [])
+    if not path:
+        return []
+
+    path_length = len(path)
+    collected_points = []
+    total_distance = 0.0
+
+    # Collect points until we have enough distance AND enough points
+    i = 0
+    while True:
+        index = (current_index + i) % path_length
+        collected_points.append(path[index])
+
+        # Calculate distance to next point if we have at least 2 points
+        if len(collected_points) >= 2:
+            prev_point = collected_points[-2]
+            curr_point = collected_points[-1]
+            segment_dist = dist(tuple(prev_point), tuple(curr_point))
+            total_distance += segment_dist
+
+        # Check termination conditions:
+        # We need BOTH: at least min_points AND at least min_distance
+        # OR we've gone through the entire path
+        if len(collected_points) >= min_points and total_distance >= min_distance:
+            break
+
+        # Safety check: don't loop forever if path is too short
+        if len(collected_points) >= path_length:
+            break
+
+        i += 1
+
+    return collected_points
+
+
 def analyze_upcoming_track(route_points) -> Tuple[float, Tuple[float, float, float]]:
     """
     Analyze the upcoming track section to determine curvature and target steering point.
 
     Args:
-        route_points: List of upcoming points (typically 5 points)
+        route_points: List of upcoming points (variable length, minimum 5 or 50m coverage)
 
     Returns:
         Tuple containing:
-        - average_curvature: Average curvature of the upcoming section
+        - average_curvature: Average curvature of the upcoming section (all points)
         - target_point: Average position of points 2-3 (indices 1-2) to steer towards
     """
     if len(route_points) < 3:
         # Not enough points to analyze
         return 0.0, tuple(route_points[1] if len(route_points) > 1 else route_points[0])
 
-    # Calculate curvature by analyzing angle changes between consecutive segments
+    # Calculate curvature by analyzing angle changes between ALL consecutive segments
     curvatures = []
 
     for i in range(len(route_points) - 2):
@@ -135,17 +185,18 @@ def analyze_upcoming_track(route_points) -> Tuple[float, Tuple[float, float, flo
             angle_diff += 2 * math.pi
 
         # Distance between points
-        segment_length = dist(p2, p3)
+        segment_length = dist(tuple(p1), tuple(p2))
 
         # Curvature = angle change / distance
         if segment_length > 0:
             curvature = abs(angle_diff) / segment_length
             curvatures.append(curvature)
 
-    # Average curvature
+    # Average curvature over ALL segments
     average_curvature = sum(curvatures) / len(curvatures) if curvatures else 0.0
 
     # Calculate target point (average of points at indices 1 and 2, skipping point 0)
+    # This part remains unchanged for steering
     if len(route_points) >= 3:
         target_point = (
             (route_points[1][0] + route_points[2][0]) / 2,
@@ -320,18 +371,18 @@ class AIDriver(AssistanceSystem):
 
         # Tunable parameters for steering - adjust these to change behavior
         # Note: These are for the PID correction part, feedforward is automatic
-        self.STEERING_KP = 0.8  # Proportional gain for steering correction
-        self.STEERING_KI = 0.05  # Integral gain for steering (corrects persistent offset)
-        self.STEERING_KD = 0.3  # Derivative gain for steering (reduces oscillation)
+        self.STEERING_KP = 0.1  # Proportional gain for steering correction
+        self.STEERING_KI = 0.4  # Integral gain for steering (corrects persistent offset)
+        self.STEERING_KD = 0.01  # Derivative gain for steering (reduces oscillation)
 
         # Speed parameters
         self.SPEED_KP = 3.0  # Proportional gain for speed (increase for faster acceleration)
         self.SPEED_KI = 0.2  # Integral gain for speed (increase to maintain target speed better)
         self.SPEED_KD = 0.1  # Derivative gain for speed (increase to smooth speed changes)
 
-        self.BASE_SPEED = 40.0  # Base speed in km/h (or your game's unit)
-        self.MIN_SPEED = 15.0  # Minimum speed on tight curves
-        self.CURVATURE_THRESHOLD = 0.02  # Curvature above which to slow down
+        self.BASE_SPEED = 70.0  # Base speed in km/h (or your game's unit)
+        self.MIN_SPEED = 10.0  # Minimum speed on tight curves
+        self.CURVATURE_THRESHOLD = 0.002  # Curvature above which to slow down
 
     def _on_ai_controller_initialized(self, ai_controller):
         self.ai_controller = ai_controller
@@ -364,7 +415,7 @@ class AIDriver(AssistanceSystem):
         else:
             # Curved section - reduce speed based on curvature
             # Higher curvature = lower speed
-            speed_reduction = (curvature - self.CURVATURE_THRESHOLD) * 200.0
+            speed_reduction = (curvature - self.CURVATURE_THRESHOLD) * 1500.0
             target_speed = max(self.MIN_SPEED, self.BASE_SPEED - speed_reduction)
             return target_speed
 
@@ -416,14 +467,18 @@ class AIDriver(AssistanceSystem):
                 vehicle_y = vehicle.data.y / 65536
                 vehicle_z = vehicle.data.z / 65536
 
-                # Find closest point and get upcoming points
+                # Find closest point and get upcoming points (50m or min 5 points)
                 closest_index = get_closest_index_on_route(
                     vehicle_x, vehicle_y, vehicle_z, route_points
                 )
-                next_five_points = get_next_points_on_route(closest_index, route_points)
+                upcoming_points = get_next_points_for_distance(
+                    closest_index, route_points, min_distance=50.0, min_points=5
+                )
 
                 # Analyze the upcoming track section
-                curvature, target_point = analyze_upcoming_track(next_five_points)
+                curvature, target_point = analyze_upcoming_track(upcoming_points)
+
+                print(f"Analyzing {len(upcoming_points)} points for curvature calculation")
 
                 # Get PID controllers for this vehicle
                 steering_controller, speed_controller = self._get_or_create_controllers(vehicle_id)
