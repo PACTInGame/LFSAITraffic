@@ -137,13 +137,13 @@ class AICarController:
         if center_zero:
             # -100 to +100 range, map to 0-65535
             if -100 <= value <= 100:
-                return max(1,int(self.ANALOG_CENTER + (value / 100.0) * self.ANALOG_CENTER))
-            return max(1, int(value))
+                return min(max(1,int(self.ANALOG_CENTER + (value / 100.0) * self.ANALOG_CENTER)), self.ANALOG_MAX)
+            return min(max(1, int(value)), self.ANALOG_MAX)
         else:
             # 0-100 percentage or raw value
             if 0 <= value <= 100:
-                return max(1, int((value / 100.0) * self.ANALOG_MAX))
-            return max(1, int(value))
+                return min(max(1, int((value / 100.0) * self.ANALOG_MAX)), self.ANALOG_MAX)
+            return min(max(1, int(value)), self.ANALOG_MAX)
 
     def _build_input_list(self, state: AIControlState) -> List[pyinsim.AIInputVal]:
         """
@@ -159,6 +159,7 @@ class AICarController:
 
         # Analog controls
         if state.steer is not None:
+            print(f"Normalized Steering: {self._normalize_analog(state.steer, center_zero=True)}")
             inputs.append(pyinsim.AIInputVal(
                 Input=AIControl.STEER,
                 Value=self._normalize_analog(state.steer, center_zero=True)
@@ -473,8 +474,8 @@ if __name__ == "__main__":
         print(f"AI {aii.PLID}: RPM={aii.RPM}, Gear={aii.Gear}")
 
 
-    controller.bind_ai_info_handler(2, monitor_ai)
-    controller.request_ai_info(2, repeat_interval=200)
+    controller.bind_ai_info_handler(1, monitor_ai)
+    controller.request_ai_info(1, repeat_interval=200)
 
     # Start InSim
     pyinsim.run()

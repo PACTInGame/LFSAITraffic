@@ -11,6 +11,21 @@ from vehicles.own_vehicle import OwnVehicle
 from vehicles.vehicle import Vehicle
 
 
+def calculate_angle(own_x: float, own_y: float, point_x: float, point_y: float, own_heading: float) -> float:
+    ang = (math.atan2((own_x / 65536 - point_x),
+                      (own_y / 65536 - point_y)) * 180.0) / 3.1415926535897931
+    if ang < 0.0:
+        ang = 360.0 + ang
+    consider_dir = ang + own_heading / 182
+    if consider_dir > 360.0:
+        consider_dir -= 360.0
+    angle = (consider_dir + 180.0) % 360.0
+
+    if angle > 180.0:
+        angle -= 360.0
+    return angle
+
+
 def dist(a=(0, 0, 0), b=(0, 0, 0)):
     """Determine the distance between two points."""
     return math.sqrt((b[0] - a[0]) * (b[0] - a[0]) + (b[1] - a[1]) * (b[1] - a[1]) + (b[2] - a[2]) * (b[2] - a[2]))
@@ -143,6 +158,101 @@ def analyze_upcoming_track(route_points) -> Tuple[float, Tuple[float, float, flo
     return average_curvature, target_point
 
 
+class SteeringPIDController:
+    """
+    PID controller specifically designed for steering control.
+    Uses feedforward control based on target angle with PID correction.
+    
+    The steering system maps:
+    - ±45° target angle → ±100 steering input (feedforward)
+    - PID corrects any remaining error
+    """
+
+    # Maximum steering angle that maps to full steering input
+    MAX_STEERING_ANGLE = 45.0  # degrees
+    MAX_STEERING_OUTPUT = 100.0  # game steering range is -100 to +100
+
+    def __init__(self, kp: float, ki: float, kd: float):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+
+        self.prev_error = 0.0
+        self.integral = 0.0
+
+        # Anti-windup: limit integral accumulation
+        self.integral_limit = 50.0
+
+    def calculate_feedforward(self, target_angle: float) -> float:
+        """
+        Calculate feedforward steering based on target angle.
+        Maps ±45° to ±100 steering output.
+        
+        Args:
+            target_angle: Desired steering angle in degrees (-180 to +180)
+            
+        Returns:
+            Feedforward steering value (-100 to +100)
+        """
+        # Clamp target angle to maximum steering angle
+        clamped_angle = max(-self.MAX_STEERING_ANGLE, min(self.MAX_STEERING_ANGLE, target_angle))
+
+        # Linear mapping: angle / max_angle * max_output
+        feedforward = (clamped_angle / self.MAX_STEERING_ANGLE) * self.MAX_STEERING_OUTPUT
+
+        return feedforward
+
+    def update(self, target_angle: float, current_heading_error: float = None, dt: float = 0.016) -> float:
+        """
+        Calculate steering output using feedforward + PID correction.
+        
+        Args:
+            target_angle: Target angle to steer towards (degrees, -180 to +180)
+            current_heading_error: Optional actual heading error for PID correction.
+                                   If None, uses target_angle as error.
+            dt: Time step (default 0.016 for ~60 FPS)
+            
+        Returns:
+            Steering output value (-100 to +100)
+        """
+        # Feedforward component based on target angle
+        feedforward = self.calculate_feedforward(target_angle)
+
+        # Use target_angle as error if no separate heading error provided
+        error = current_heading_error if current_heading_error is not None else target_angle
+
+        # Proportional term
+        p_term = self.kp * error
+
+        # Integral term with anti-windup
+        self.integral += error * dt
+        self.integral = max(-self.integral_limit, min(self.integral_limit, self.integral))
+        i_term = self.ki * self.integral
+
+        # Derivative term
+        derivative = (error - self.prev_error) / dt if dt > 0 else 0.0
+        d_term = self.kd * derivative
+
+        # Update previous error
+        self.prev_error = error
+
+        # Combine feedforward and PID correction
+        pid_correction = p_term + i_term + d_term
+
+        # Total steering output
+        steering_output = feedforward + pid_correction
+
+        # Clamp to valid range
+        steering_output = max(-self.MAX_STEERING_OUTPUT, min(self.MAX_STEERING_OUTPUT, steering_output))
+
+        return steering_output
+
+    def reset(self):
+        """Reset the controller state"""
+        self.prev_error = 0.0
+        self.integral = 0.0
+
+
 class SimplePIDController:
     """
     Simple PID controller for controlling a single value.
@@ -195,7 +305,6 @@ class SimplePIDController:
         self.integral = 0.0
 
 
-
 class AIDriver(AssistanceSystem):
     """Ai Driver"""
 
@@ -206,19 +315,20 @@ class AIDriver(AssistanceSystem):
         self.event_bus.subscribe("AI_Controller_initialized", self._on_ai_controller_initialized)
 
         # PID controllers for each vehicle (will be created on demand)
-        self.steering_controllers: Dict[int, SimplePIDController] = {}
+        self.steering_controllers: Dict[int, SteeringPIDController] = {}
         self.speed_controllers: Dict[int, SimplePIDController] = {}
 
-        # Tunable parameters - adjust these to change behavior
-        self.STEERING_KP = 2.0  # Proportional gain for steering (increase for more aggressive steering)
-        self.STEERING_KI = 0.1  # Integral gain for steering (increase to correct persistent offset)
-        self.STEERING_KD = 0.5  # Derivative gain for steering (increase to reduce oscillation)
+        # Tunable parameters for steering - adjust these to change behavior
+        # Note: These are for the PID correction part, feedforward is automatic
+        self.STEERING_KP = 0.8  # Proportional gain for steering correction
+        self.STEERING_KI = 0.05  # Integral gain for steering (corrects persistent offset)
+        self.STEERING_KD = 0.3  # Derivative gain for steering (reduces oscillation)
 
+        # Speed parameters
         self.SPEED_KP = 3.0  # Proportional gain for speed (increase for faster acceleration)
         self.SPEED_KI = 0.2  # Integral gain for speed (increase to maintain target speed better)
         self.SPEED_KD = 0.1  # Derivative gain for speed (increase to smooth speed changes)
 
-        # Speed parameters
         self.BASE_SPEED = 40.0  # Base speed in km/h (or your game's unit)
         self.MIN_SPEED = 15.0  # Minimum speed on tight curves
         self.CURVATURE_THRESHOLD = 0.02  # Curvature above which to slow down
@@ -226,10 +336,10 @@ class AIDriver(AssistanceSystem):
     def _on_ai_controller_initialized(self, ai_controller):
         self.ai_controller = ai_controller
 
-    def _get_or_create_controllers(self, vehicle_id: int) -> Tuple[SimplePIDController, SimplePIDController]:
+    def _get_or_create_controllers(self, vehicle_id: int) -> Tuple[SteeringPIDController, SimplePIDController]:
         """Get or create PID controllers for a vehicle"""
         if vehicle_id not in self.steering_controllers:
-            self.steering_controllers[vehicle_id] = SimplePIDController(
+            self.steering_controllers[vehicle_id] = SteeringPIDController(
                 self.STEERING_KP, self.STEERING_KI, self.STEERING_KD
             )
         if vehicle_id not in self.speed_controllers:
@@ -237,37 +347,6 @@ class AIDriver(AssistanceSystem):
                 self.SPEED_KP, self.SPEED_KI, self.SPEED_KD
             )
         return self.steering_controllers[vehicle_id], self.speed_controllers[vehicle_id]
-
-    def calculate_steering_error(self, vehicle_x: float, vehicle_y: float,
-                                 vehicle_heading: float, target_point: Tuple[float, float, float]) -> float:
-        """
-        Calculate steering error (angle to target point).
-
-        Args:
-            vehicle_x, vehicle_y: Current vehicle position
-            vehicle_heading: Current vehicle heading in radians
-            target_point: Target point to steer towards (x, y, z)
-
-        Returns:
-            Steering error in radians (positive = need to turn right, negative = turn left)
-        """
-        # Vector from vehicle to target
-        dx = target_point[0] - vehicle_x
-        dy = target_point[1] - vehicle_y
-
-        # Angle to target
-        angle_to_target = math.atan2(dy, dx)
-
-        # Calculate error (difference between where we're heading and where we want to go)
-        error = angle_to_target - vehicle_heading
-
-        # Normalize to [-pi, pi]
-        while error > math.pi:
-            error -= 2 * math.pi
-        while error < -math.pi:
-            error += 2 * math.pi
-
-        return error
 
     def calculate_target_speed(self, curvature: float) -> float:
         """
@@ -290,7 +369,7 @@ class AIDriver(AssistanceSystem):
             return target_speed
 
     def monitor_ai(self, aii):
-        if aii.RPM >5000:
+        if aii.RPM > 5000:
             self.ai_controller.control_ai(aii.PLID, AIControlState(
                 shift_up=True,
             ))
@@ -302,32 +381,33 @@ class AIDriver(AssistanceSystem):
             self.ai_controller.control_ai(aii.PLID, AIControlState(
                 shift_up=True,
             ))
-        if aii.RPM <1000:
+        if aii.RPM < 300:
             self.ai_controller.control_ai(aii.PLID, AIControlState(
                 ignition=True,
             ))
         print(f"AI Info for Vehicle {aii.PLID}: RPM={aii.RPM}, Gear={aii.Gear}")
-
 
     def process(self, own_vehicle: OwnVehicle, vehicles: Dict[int, Vehicle]) -> Dict[str, Any]:
         """Verarbeitet die Auto-Hold-Logik"""
         if self.routes is None:
             self.routes = load_routes_from_file("StreetMapCreator/track_data.json")
             self.routes = {road['road_id']: road for road in self.routes}
-
+        print("AI Driver Processing...")
         # Initialize test vehicle with route 20
         for vehicle_id in vehicles.keys():
-            if vehicle_id == 2:
+            if vehicle_id == list(vehicles.keys())[0]:  # Just pick the first vehicle for testing
                 if vehicles.get(vehicle_id).current_route is None:
                     vehicles.get(vehicle_id).current_route = 20
 
-
-                    self.ai_controller.bind_ai_info_handler(2, self.monitor_ai)
-                    self.ai_controller.request_ai_info(2, repeat_interval=200)
+                    self.ai_controller.bind_ai_info_handler(list(vehicles.keys())[0], self.monitor_ai)
+                    self.ai_controller.request_ai_info(list(vehicles.keys())[0], repeat_interval=100)
+        debug_angle = calculate_angle(own_vehicle.data.x, own_vehicle.data.y, 290.375, -139.9375,
+                                      own_vehicle.data.heading)
+        print(f"Debug Angle to Point (290.375, -139.9375): {debug_angle:.2f} degrees")
         # Process each vehicle that has a route assigned
         for vehicle_id in vehicles.keys():
             vehicle = vehicles.get(vehicle_id)
-
+            print(f"Processing Vehicle ID: {vehicle_id}, with {vehicle.data.player_id}")
             if vehicle.current_route is not None:
                 route_points = self.routes[vehicle.current_route]
 
@@ -350,6 +430,7 @@ class AIDriver(AssistanceSystem):
 
                 # Calculate wanted speed based on curvature
                 target_speed = self.calculate_target_speed(curvature)
+                print(f"Calculated Target Speed: {target_speed:.2f} km/h based on Curvature: {curvature:.4f}")
 
                 # Get current speed (assuming vehicle.data.speed is in appropriate units)
                 current_speed = vehicle.data.speed if hasattr(vehicle.data, 'speed') else 0.0
@@ -371,41 +452,35 @@ class AIDriver(AssistanceSystem):
                     brake = min(100, max(0, -speed_control))
 
                 # Calculate steering based on target_point
-                # Get vehicle heading (assuming it's available, otherwise use velocity direction)
-                if hasattr(vehicle.data, 'heading'):
-                    vehicle_heading = vehicle.data.heading
-                else:
-                    # Fallback: calculate heading from velocity if available
-                    # You may need to adjust this based on your Vehicle class structure
-                    vehicle_heading = 0.0  # Default, should be replaced with actual heading
+                print(f"Target Point: {target_point}")
+                print(f"Vehicle Position: ({vehicle_x:.2f}, {vehicle_y:.2f})")
+                print(f"Vehicle Heading: {vehicle.data.heading if hasattr(vehicle.data, 'heading') else 'N/A'}")
 
-                # Calculate steering error
-                steering_error = self.calculate_steering_error(
-                    vehicle_x, vehicle_y, vehicle_heading, target_point
+                # Calculate the angle to the target point (relative to vehicle heading)
+                target_angle = calculate_angle(
+                    vehicle.data.x, vehicle.data.y,
+                    target_point[0], target_point[1],
+                    vehicle.data.heading
                 )
+                print(f"Target Angle: {target_angle:.2f} degrees")
 
-                # Get steering control output from PID
-                steering_control = steering_controller.update(steering_error)
-
-                # Convert to game's steering range (-100 to 100)
-                # The multiplier here converts from radians to game units
-                # Adjust the 50 multiplier to change steering sensitivity
-                steering = max(-100, min(100, steering_control * 50))
+                # Use the steering PID controller to calculate steering input
+                # The controller uses feedforward (±45° → ±100) plus PID correction
+                steering = steering_controller.update(target_angle)
+                print(f"Calculated Steering: {steering:.2f}")
 
                 # Send control commands to AI controller
                 if self.ai_controller is not None:
-
                     self.ai_controller.control_ai(vehicle_id, AIControlState(
                         throttle=int(throttle),
                         brake=int(brake),
                         steer=int(steering),
                     ))
 
-
                     print(f"Vehicle {vehicle_id}: Curvature={curvature:.4f}, Target={target_point}")
                     print(
                         f"  Speed: {current_speed:.1f} → {target_speed:.1f} | Throttle: {throttle:.0f}% | Brake: {brake:.0f}%")
-                    print(f"  Steering Error: {steering_error:.3f} rad | Steer: {steering:.0f}")
+                    print(f"  Target Angle: {target_angle:.2f}° | Steer: {steering:.0f}")
 
         return {
             'ai_active': True
